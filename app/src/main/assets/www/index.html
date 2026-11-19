@@ -180,6 +180,19 @@ textarea.fld{min-height:120px;font-size:13px;font-family:monospace}
   <section class="view" id="v-set">
     <h2>Настройки</h2>
     <div class="set"><div class="it"><span>Курс доллара, сум</span><input id="rate" inputmode="numeric"></div></div>
+    <h4>Синхронизация с центром</h4>
+    <div class="set" id="ssync">
+      <div class="it"><span>Статус <span class="sm mut" id="sySt"></span></span><button class="btn" id="syNow">Сейчас</button></div>
+      <div id="syForm">
+        <div class="addrow"><input id="syUrl" placeholder="https://hub.waree.uz" inputmode="url" autocomplete="off"></div>
+        <div class="addrow"><input id="syKey" placeholder="Ключ устройства hub_…" autocomplete="off" type="password"><button class="btn pri" id="syGo">Подключить</button></div>
+      </div>
+      <div id="syChoice" style="display:none;padding:10px 0">
+        <p class="sm" id="syChoiceTxt" style="margin:0 0 8px"></p>
+        <div class="addrow" style="padding:0"><button class="btn" id="syTake">Взять с сервера</button><button class="btn pri" id="syGive">Отправить с телефона</button></div>
+      </div>
+      <div class="it" id="syMore"><button class="btn" id="syPull">Загрузить с сервера</button><button class="btn del" id="syOff">Отключить</button></div>
+    </div>
     <h4>Уведомления</h4>
     <div class="set" id="snotif">
       <div class="it"><span>Разрешение <span class="sm mut" id="nperm"></span></span><button class="btn" id="nask">Разрешить</button></div>
@@ -284,7 +297,56 @@ function syncNative(){
   const rec=D.rec.map(r=>({name:r.name,amt:fmt(r.amt,curOf(r.acc)),day:r.day,paid:[...new Set(D.tx.filter(t=>t.rec===r.id).map(t=>t.recM))]}));
   try{Android.setReminders(JSON.stringify({recOn:!!D.notif.rec,eveOn:!!D.notif.eve,lastTx:D.lastTxDay||'',rec}))}catch(e){}
 }
-const persist=()=>{save('r.data',D);syncNative()};
+const persist=()=>{save('r.data',D);syncNative();if(typeof SY!=='undefined')SY.changed()};
+/* ---------- синхронизация с центром (hub) ---------- */
+function makeSync(cfg){
+  // cfg: {app, store, payload(), apply(data), hasData(), onChange()}
+  const K=cfg.store;
+  const st=()=>{try{return JSON.parse(localStorage.getItem(K))||{}}catch(e){return {}}};
+  const put=o=>{try{localStorage.setItem(K,JSON.stringify(Object.assign(st(),o)))}catch(e){}};
+  const base=()=>(st().url||'https://hub.waree.uz').replace(/\/+$/,'');
+  const on=()=>!!(st().key&&st().enabled);
+  async function req(method,body){
+    const s=st();
+    const ctrl=new AbortController();const tm=setTimeout(()=>ctrl.abort(),15000);
+    try{
+      const r=await fetch(base()+'/api/sync/'+(method==='PING'?'ping':cfg.app),{method:method==='PING'?'GET':method,signal:ctrl.signal,
+        headers:Object.assign({'Authorization':'Bearer '+(s.key||'')},body?{'Content-Type':'application/json'}:{}),body:body?JSON.stringify(body):undefined});
+      let j=null;try{j=await r.json()}catch(e){}
+      if(!r.ok){const e=new Error((j&&j.error)||('Ошибка '+r.status));e.status=r.status;throw e}
+      return j;
+    }catch(e){if(e.name==='AbortError')throw new Error('Сервер не отвечает');if(e instanceof TypeError)throw new Error('Нет связи с сервером');throw e}
+    finally{clearTimeout(tm)}
+  }
+  let timer=null,busy=false;
+  async function push(){
+    if(!on()||busy)return;busy=true;
+    try{await req('PUT',{data:cfg.payload()});put({last:Date.now(),dirty:false,err:''})}
+    catch(e){put({err:e.message,dirty:true});if(e.status===401)put({enabled:false})}
+    finally{busy=false;cfg.onChange()}
+  }
+  return {
+    state:st,
+    changed(){if(!on())return;put({dirty:true});clearTimeout(timer);timer=setTimeout(push,2500)},
+    push,
+    resume(){if(on()&&st().dirty)push()},
+    async connect(url,key){
+      put({url:url||'https://hub.waree.uz',key:key.trim(),enabled:false,err:''});
+      await req('PING');
+      let remote=null;
+      try{remote=await req('GET')}catch(e){if(e.status!==404)throw e}
+      put({enabled:true});
+      return remote; // null — на сервере пусто
+    },
+    async pull(){const r=await req('GET');cfg.apply(r.data);put({last:Date.now(),dirty:false,err:''});return r},
+    disable(){put({enabled:false});cfg.onChange()}
+  };
+}
+
+const SY=makeSync({app:'rasxodnik',store:'r.sync',
+  payload:()=>({app:'rasxodnik',v:2,at:new Date().toISOString(),data:D}),
+  apply:d=>{D=normalize(d&&d.data?d.data:d);save('r.data',D);syncNative();render()},
+  onChange:()=>{if(typeof renderSync==='function')renderSync()}});
 
 let cur=new Date();cur=new Date(cur.getFullYear(),cur.getMonth(),1);
 let view='home',statT='e',eseg='rec',openCat=null;
@@ -433,8 +495,15 @@ function renderNotif(){
   $('nperm').textContent=ok?'· включено':'· выключено';$('nask').style.display=ok?'none':'';
 }
 window.onNotifPerm=()=>{renderNotif()};
+function agoTxt(ts){if(!ts)return 'никогда';const m=Math.round((Date.now()-ts)/6e4);return m<1?'только что':m<60?m+' мин назад':m<1440?Math.round(m/60)+' ч назад':Math.round(m/1440)+' дн. назад'}
+function renderSync(){
+  const s=SY.state(),on=!!(s.key&&s.enabled);
+  $('syUrl').value=s.url||'https://hub.waree.uz';
+  $('syForm').style.display=on?'none':'';$('syMore').style.display=on?'':'none';$('syNow').style.display=on?'':'none';
+  $('sySt').textContent=on?('· '+(s.err?'ошибка: '+s.err:'синхронизировано '+agoTxt(s.last))+(s.dirty&&!s.err?' · ждёт отправки':'')):(s.err?'· '+s.err:'· выключена');
+}
 function renderSet(){
-  renderNotif();
+  renderNotif();renderSync();
   $('rate').value=D.rate;
   $('saccs').innerHTML=D.accs.map((a,i)=>`<div class="it"><span>${esc(a.name)}<br><span class="sm mut">стартовый остаток, ${a.cur==='USD'?'$':'сум'}</span></span><span style="display:flex;align-items:center"><input data-st="${i}" inputmode="decimal" value="${+a.start||0}"><button class="x" data-da="${i}" aria-label="Удалить">×</button></span></div>`).join('')+
     `<div class="addrow"><input id="nacc" placeholder="Новый кошелёк"><select id="nacur"><option value="UZS">сум</option><option value="USD">$</option></select></div><div class="addrow"><input id="nast" inputmode="decimal" placeholder="Остаток сейчас"><button class="btn pri" id="addAcc">Добавить</button></div>`;
@@ -603,6 +672,32 @@ function go(v){view=v;$$('.view').forEach(x=>x.classList.toggle('on',x.id==='v-'
 $('nav').addEventListener('click',e=>{const b=e.target.closest('[data-v]');if(b)go(b.dataset.v)});
 $('dueBox').addEventListener('click',()=>{eseg='rec';renderExp();go('exp')});
 
+/* синхронизация */
+$('syGo').addEventListener('click',async()=>{
+  const key=$('syKey').value.trim();if(!/^hub_/.test(key)){toast('Вставь ключ из центра');return}
+  $('syGo').disabled=true;
+  try{
+    const remote=await SY.connect($('syUrl').value.trim(),key);$('syKey').value='';
+    const localEmpty=!D.tx.length&&!D.rec.length;
+    if(remote&&remote.data&&localEmpty){await SY.pull();toast('Данные загружены с сервера')}
+    else if(remote&&remote.data){$('syChoice').style.display='';$('syChoiceTxt').textContent='На сервере уже есть данные от '+new Date(remote.updated).toLocaleString('ru-RU')+'. Что оставить?'}
+    else{await SY.push();toast('Подключено')}
+  }catch(e){toast(e.message)}
+  $('syGo').disabled=false;renderSync();
+});
+$('syTake').addEventListener('click',async()=>{try{await SY.pull();toast('Взято с сервера')}catch(e){toast(e.message)}$('syChoice').style.display='none';renderSync()});
+$('syGive').addEventListener('click',async()=>{await SY.push();$('syChoice').style.display='none';toast('Отправлено');renderSync()});
+$('syNow').addEventListener('click',async()=>{await SY.push();const s=SY.state();toast(s.err?s.err:'Синхронизировано')});
+let pullArm=0;
+$('syPull').addEventListener('click',async()=>{
+  if(Date.now()-pullArm>3000){pullArm=Date.now();$('syPull').textContent='Заменить данные на телефоне?';setTimeout(()=>$('syPull').textContent='Загрузить с сервера',3000);return}
+  pullArm=0;$('syPull').textContent='Загрузить с сервера';
+  try{await SY.pull();toast('Данные заменены данными с сервера')}catch(e){toast(e.message)}
+});
+$('syOff').addEventListener('click',()=>{SY.disable();toast('Синхронизация выключена')});
+window.addEventListener('online',()=>SY.resume());
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')SY.resume()});
+
 /* уведомления */
 $('nrec').addEventListener('change',e=>{D.notif.rec=e.target.checked;persist()});
 $('neve').addEventListener('change',e=>{D.notif.eve=e.target.checked;persist()});
@@ -645,7 +740,7 @@ window.onBack=()=>{
   if(view!=='home'){go('home');return true}
   return false;
 };
-render();syncNative();
+render();syncNative();SY.resume();
 }
 </script>
 </body>
