@@ -180,6 +180,13 @@ textarea.fld{min-height:120px;font-size:13px;font-family:monospace}
   <section class="view" id="v-set">
     <h2>Настройки</h2>
     <div class="set"><div class="it"><span>Курс доллара, сум</span><input id="rate" inputmode="numeric"></div></div>
+    <h4>Уведомления</h4>
+    <div class="set" id="snotif">
+      <div class="it"><span>Разрешение <span class="sm mut" id="nperm"></span></span><button class="btn" id="nask">Разрешить</button></div>
+      <label class="it"><span>Обязательные платежи<br><span class="sm mut">в 10:00 за 3 дня, за день, в день оплаты и при просрочке</span></span><input type="checkbox" id="nrec" style="width:22px;height:22px;accent-color:var(--acc)"></label>
+      <label class="it"><span>Записать расходы<br><span class="sm mut">в 21:00, если за день ничего не записано</span></span><input type="checkbox" id="neve" style="width:22px;height:22px;accent-color:var(--acc)"></label>
+      <div class="it"><span>Проверить</span><button class="btn" id="ntest">Тестовое уведомление</button></div>
+    </div>
     <h4>Кошельки</h4>
     <div class="set" id="saccs"></div>
     <h4>Категории расходов и подкатегории</h4>
@@ -267,11 +274,17 @@ const DEF={
   catE:['Еда','Кафе','Транспорт','Связь и интернет','Сервера и софт','Одежда','Учёба','Здоровье','Подарки','Развлечения','Дом','Другое'],
   catI:['WAREE','Фриланс','Зарплата','Подарки','Другое'],
   sub:{'Еда':['Продукты','Рынок','Доставка','Перекус'],'Кафе':['Кофе','Обед','Ужин'],'Транспорт':['Такси','Бензин','Автобус и метро','Ремонт'],'Связь и интернет':['Мобильная связь','Домашний интернет'],'Сервера и софт':['VPS','Домены','Подписки','AI-сервисы'],'Одежда':['Одежда','Обувь'],'Учёба':['Курсы','Книги','Контракт'],'Здоровье':['Аптека','Врач','Спорт'],'Развлечения':['Кино','Игры','Подписки'],'Дом':['Аренда','Коммуналка','Хозтовары']},
-  rec:[],tx:[],lastBackup:0
+  rec:[],tx:[],lastBackup:0,notif:{rec:true,eve:true},lastTxDay:''
 };
-function normalize(d){const o=Object.assign(clone(DEF),d||{});if(!o.sub)o.sub=clone(DEF.sub);if(!Array.isArray(o.rec))o.rec=[];return o}
+function normalize(d){const o=Object.assign(clone(DEF),d||{});if(!o.sub)o.sub=clone(DEF.sub);if(!Array.isArray(o.rec))o.rec=[];if(!o.notif)o.notif={rec:true,eve:true};return o}
 let D=normalize(load('r.data',{}));
-const persist=()=>save('r.data',D);
+const hasAndroid=()=>{try{return !!(window.Android&&Android.setReminders)}catch(e){return false}};
+function syncNative(){
+  if(!hasAndroid())return;
+  const rec=D.rec.map(r=>({name:r.name,amt:fmt(r.amt,curOf(r.acc)),day:r.day,paid:[...new Set(D.tx.filter(t=>t.rec===r.id).map(t=>t.recM))]}));
+  try{Android.setReminders(JSON.stringify({recOn:!!D.notif.rec,eveOn:!!D.notif.eve,lastTx:D.lastTxDay||'',rec}))}catch(e){}
+}
+const persist=()=>{save('r.data',D);syncNative()};
 
 let cur=new Date();cur=new Date(cur.getFullYear(),cur.getMonth(),1);
 let view='home',statT='e',eseg='rec',openCat=null;
@@ -413,7 +426,15 @@ function renderStats(){
 }
 
 /* настройки */
+function renderNotif(){
+  $('nrec').checked=!!D.notif.rec;$('neve').checked=!!D.notif.eve;
+  if(!hasAndroid()){$('nperm').textContent='· работает только в приложении';$('nask').style.display='none';return}
+  let ok=false;try{ok=Android.notifAllowed()}catch(e){}
+  $('nperm').textContent=ok?'· включено':'· выключено';$('nask').style.display=ok?'none':'';
+}
+window.onNotifPerm=()=>{renderNotif()};
 function renderSet(){
+  renderNotif();
   $('rate').value=D.rate;
   $('saccs').innerHTML=D.accs.map((a,i)=>`<div class="it"><span>${esc(a.name)}<br><span class="sm mut">стартовый остаток, ${a.cur==='USD'?'$':'сум'}</span></span><span style="display:flex;align-items:center"><input data-st="${i}" inputmode="decimal" value="${+a.start||0}"><button class="x" data-da="${i}" aria-label="Удалить">×</button></span></div>`).join('')+
     `<div class="addrow"><input id="nacc" placeholder="Новый кошелёк"><select id="nacur"><option value="UZS">сум</option><option value="USD">$</option></select></div><div class="addrow"><input id="nast" inputmode="decimal" placeholder="Остаток сейчас"><button class="btn pri" id="addAcc">Добавить</button></div>`;
@@ -508,7 +529,7 @@ $('form').addEventListener('submit',e=>{
     t.cat=F.cat;if(F.t==='e'){if(F.sub)t.sub=F.sub;if(F.biz)t.biz=1}
   }
   const wasEdit=!!edit;
-  if(edit)D.tx=D.tx.map(x=>x.id===edit.id?t:x);else D.tx.push(t);
+  if(edit)D.tx=D.tx.map(x=>x.id===edit.id?t:x);else{D.tx.push(t);D.lastTxDay=ymd(new Date())}
   if(!t.rec){const last=load('r.last',{});last[F.t]=F.acc;save('r.last',last)}
   persist();closeForm();
   if(!t.rec){const d=new Date(t.date);if(!isNaN(d))cur=new Date(d.getFullYear(),d.getMonth(),1)}
@@ -582,6 +603,12 @@ function go(v){view=v;$$('.view').forEach(x=>x.classList.toggle('on',x.id==='v-'
 $('nav').addEventListener('click',e=>{const b=e.target.closest('[data-v]');if(b)go(b.dataset.v)});
 $('dueBox').addEventListener('click',()=>{eseg='rec';renderExp();go('exp')});
 
+/* уведомления */
+$('nrec').addEventListener('change',e=>{D.notif.rec=e.target.checked;persist()});
+$('neve').addEventListener('change',e=>{D.notif.eve=e.target.checked;persist()});
+$('nask').addEventListener('click',()=>{try{Android.requestNotif()}catch(e){}});
+$('ntest').addEventListener('click',()=>{if(!hasAndroid()){toast('Работает только в приложении');return}let ok=false;try{ok=Android.notifAllowed()}catch(e){}if(!ok){toast('Сначала разреши уведомления');try{Android.requestNotif()}catch(e){}return}try{Android.testNotify();toast('Отправлено')}catch(e){}});
+
 /* настройки */
 $('rate').addEventListener('change',e=>{const v=parse(e.target.value);if(v>0){D.rate=v;persist();render();toast('Курс сохранён')}else e.target.value=D.rate});
 $('v-set').addEventListener('change',e=>{const i=e.target.dataset&&e.target.dataset.st;if(i===undefined)return;D.accs[+i].start=parse(e.target.value);persist();renderHome();toast('Остаток сохранён')});
@@ -618,7 +645,7 @@ window.onBack=()=>{
   if(view!=='home'){go('home');return true}
   return false;
 };
-render();
+render();syncNative();
 }
 </script>
 </body>
